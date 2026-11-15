@@ -191,11 +191,25 @@ status_t SetDefaultAcl(const std::string& path, mode_t mode, uid_t uid, gid_t gi
 
     int ret = setxattr(path.c_str(), XATTR_NAME_POSIX_ACL_DEFAULT, acl_header, size, 0);
 
+    if (ret != 0 && (errno == EOPNOTSUPP || errno == ENOTSUP)) {
+        // cappu: this kernel's ext4 backport is built without POSIX ACL support and has no
+        // usable sdcardfs either. The default ACL only widens access for MEDIA_RW holders;
+        // going without it must not make user storage preparation fail.
+        PLOG(WARNING) << "Default ACLs unsupported on " << path << ", continuing without";
+        return OK;
+    }
     if (ret != 0) {
         PLOG(ERROR) << "Failed to set default ACL on " << path;
     }
 
     return ret;
+}
+
+// cappu: the 3.18 kernel's ext4 has no project quota support (FS_IOC_FS[GS]ETXATTR and
+// FS_PROJINHERIT_FL arrived in 4.5). Without sdcardfs vold would otherwise fail every
+// external-storage directory it prepares; treat "not supported" as success.
+static bool ProjectQuotaUnsupported(int err) {
+    return err == ENOTTY || err == EOPNOTSUPP || err == EINVAL || err == ENOSYS;
 }
 
 int SetQuotaInherit(const std::string& path) {
@@ -216,6 +230,7 @@ int SetQuotaInherit(const std::string& path) {
     flags |= FS_PROJINHERIT_FL;
 
     ret = ioctl(fd, FS_IOC_SETFLAGS, &flags);
+    if (ret == -1 && ProjectQuotaUnsupported(errno)) return 0;
     if (ret == -1) {
         PLOG(ERROR) << "Failed to set flags for " << path << " to set project id inheritance.";
         return ret;
@@ -234,6 +249,7 @@ int SetQuotaProjectId(const std::string& path, long projectId) {
     }
 
     int ret = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
+    if (ret == -1 && ProjectQuotaUnsupported(errno)) return 0;
     if (ret == -1) {
         PLOG(ERROR) << "Failed to get extended attributes for " << path << " to get project id.";
         return ret;
@@ -241,6 +257,7 @@ int SetQuotaProjectId(const std::string& path, long projectId) {
 
     fsx.fsx_projid = projectId;
     ret = ioctl(fd, FS_IOC_FSSETXATTR, &fsx);
+    if (ret == -1 && ProjectQuotaUnsupported(errno)) return 0;
     if (ret == -1) {
         PLOG(ERROR) << "Failed to set project id on " << path;
         return ret;
